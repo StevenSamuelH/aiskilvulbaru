@@ -1,61 +1,15 @@
-# prediction.py
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error
-import requests
-import json
-import plotly.graph_objects as go
-
-
-# Konfigurasi IBM Watson API
-API_KEY = 'O02u_evhjylXQYdVJf5GuySdjk5UJq5ZtLU11rN6xz1p'
-WML_AUTH_ENDPOINT = 'https://iam.cloud.ibm.com/identity/token'
-WML_ENDPOINT = 'https://jp-tok.ml.cloud.ibm.com/ml/v4/deployments/capstone/predictions?version=2021-05-01'
-
-# Fungsi untuk mendapatkan akses token
-def get_access_token(api_key):
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    data = f'apikey={api_key}&grant_type=urn:ibm:params:oauth:grant-type:apikey'
-    response = requests.post(WML_AUTH_ENDPOINT, headers=headers, data=data)
-    if response.status_code == 200:
-        return response.json()['access_token']
-    else:
-        st.error(f"Failed to get access token. Status code: {response.status_code}, Response: {response.text}")
-        return None
-
-# Fungsi untuk memanggil API IBM Watson
-def call_watson_ml(payload, access_token):
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {access_token}'
-    }
-    response = requests.post(WML_ENDPOINT, headers=headers, data=json.dumps(payload))
-    if response.status_code == 200:
-        return response.json()
-    else:
-        st.error(f"Failed to get prediction. Status code: {response.status_code}, Response: {response.text}")
-        return None
-# Initialize session state to store data
-if 'data' not in st.session_state:
-    st.session_state.data = []
-
-# Display the data
-st.subheader("Loaded Data")
-if st.session_state.data:
-    df = pd.DataFrame(st.session_state.data, columns=["Day", "Month", "Year", "Revenue", "Cost", "Profit", "Profit %"])
-    st.dataframe(df)
-else:
-    st.write("No data available.")    
-
+import numpy as np
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, VotingRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
 def app():
     st.title("Prediction Dashboard")
-    
+
     # Add custom CSS
     st.markdown(
         """
@@ -97,52 +51,116 @@ def app():
     df = st.session_state['dataframe']
     
     # Data Cleaning
+    df.drop_duplicates(inplace=True)
     df['Sales'] = df['Sales'].astype(str).str.replace(',', '').astype(float)
     df['Profit'] = df['Profit'].astype(str).str.replace(',', '').astype(float)
     df['Discount'] = df['Discount'].astype(str).str.replace(',', '').astype(float)
     
-    # Display the data
-    st.subheader("Loaded Data")
-    st.dataframe(df.head())
+    df['Sales'].fillna(df['Sales'].median(), inplace=True)
+    df['Profit'].fillna(df['Profit'].median(), inplace=True)
+    df['Discount'].fillna(df['Discount'].median(), inplace=True)
 
-    # Data Preparation for Machine Learning
+    Q1 = df['Sales'].quantile(0.25)
+    Q3 = df['Sales'].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    df = df[(df['Sales'] >= lower_bound) & (df['Sales'] <= upper_bound)]
+
     df['Order Date'] = pd.to_datetime(df['Order Date'])
     df['Order Month'] = df['Order Date'].dt.to_period('M').astype(str)
-    monthly_sales = df.groupby('Order Month')['Sales'].sum().reset_index()
+    df['Month'] = df['Order Date'].dt.month
+    df['Month_sin'] = np.sin(2 * np.pi * df['Month'] / 12)
+    df['Month_cos'] = np.cos(2 * np.pi * df['Month'] / 12)
 
-    # Splitting the data into training and test sets
-    X = monthly_sales.index.values.reshape(-1, 1)
+    # Aggregate sales data by month
+    monthly_sales = df.groupby('Order Month').agg({
+        'Sales': 'sum',
+        'Discount': 'mean',
+        'Profit': 'sum',
+        'Quantity': 'sum',
+        'Month_sin': 'first',
+        'Month_cos': 'first'
+    }).reset_index()
+
+    monthly_sales['Lagged_Sales'] = monthly_sales['Sales'].shift(1).fillna(0)
+    X = monthly_sales[['Month_sin', 'Month_cos', 'Lagged_Sales', 'Discount', 'Profit', 'Quantity']].values
     y = monthly_sales['Sales'].values
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Training the Linear Regression model
-    model = LinearRegression()
-    model.fit(X_train, y_train)
+    # Hyperparameter tuning for Gradient Boosting Regressor and Random Forest Regressor
+    gb_param_dist = {
+        'n_estimators': [100, 200, 300, 400, 500],
+        'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3],
+        'max_depth': [3, 4, 5, 6, 7],
+        'min_samples_split': [2, 5, 10, 15],
+        'min_samples_leaf': [1, 2, 4]
+    }
 
-    # Making predictions
-    y_pred = model.predict(X_test)
+    rf_param_dist = {
+        'n_estimators': [100, 200, 300, 400, 500],
+        'max_features': ['auto', 'sqrt', 'log2'],
+        'max_depth': [None, 10, 20, 30, 40],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
 
-    # Displaying the results
-    st.subheader("📈 Linear Regression Model Results")
+    with st.spinner('Training the models, please wait...'):
+        gb_random_search = RandomizedSearchCV(GradientBoostingRegressor(random_state=42), param_distributions=gb_param_dist, n_iter=100, cv=5, scoring='r2', random_state=42, n_jobs=-1)
+        rf_random_search = RandomizedSearchCV(RandomForestRegressor(random_state=42), param_distributions=rf_param_dist, n_iter=100, cv=5, scoring='r2', random_state=42, n_jobs=-1)
+
+        gb_random_search.fit(X_train, y_train)
+        rf_random_search.fit(X_train, y_train)
+
+    best_gb_model = gb_random_search.best_estimator_
+    best_rf_model = rf_random_search.best_estimator_
+
+    # Ensemble model
+    ensemble_model = VotingRegressor(estimators=[('gb', best_gb_model), ('rf', best_rf_model)])
+    ensemble_model.fit(X_train, y_train)
+
+    y_pred = ensemble_model.predict(X_test)
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+    st.write(f"**Mean Squared Error:** {mse}")
+    st.write(f"**R2 Score:** {r2}")
+    st.write(f"**Mean Absolute Error:** {mae}")
+
+    st.subheader("📈 Ensemble Model Results")
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(X_train, y_train, color='blue', label='Training Data')
-    ax.scatter(X_test, y_test, color='green', label='Test Data')
-    ax.plot(X_test, y_pred, color='red', linewidth=2, label='Predicted Line')
+    ax.scatter(range(len(X_train)), y_train, color='blue', label='Training Data')
+    ax.scatter(range(len(X_train), len(X_train) + len(X_test)), y_test, color='green', label='Test Data')
+    ax.plot(range(len(X_train), len(X_train) + len(X_test)), y_pred, color='red', linewidth=2, label='Predicted Line')
     ax.set_xlabel('Months')
     ax.set_ylabel('Sales')
     ax.set_title('Monthly Sales Prediction')
     ax.legend()
     st.pyplot(fig)
 
-    # Model Evaluation
-    mse = mean_squared_error(y_test, y_pred)
-    st.write(f"**Mean Squared Error:** {mse}")
-
-    # Future Predictions
     st.subheader("📅 Future Sales Prediction")
+    # Future Predictions
     future_months = pd.date_range(start=df['Order Date'].max(), periods=12, freq='M').to_period('M').astype(str)
     future_indices = range(len(monthly_sales), len(monthly_sales) + len(future_months))
-    future_sales = model.predict([[i] for i in future_indices])
+
+    # Initialize future_sales with the last known sales value
+    last_known_sales = monthly_sales['Sales'].iloc[-1]
+    future_sales = [last_known_sales]
+
+    for i in future_indices:
+        month_sin = np.sin(2 * np.pi * (i % 12) / 12)
+        month_cos = np.cos(2 * np.pi * (i % 12) / 12)
+        lagged_sales = future_sales[-1]
+        prediction = ensemble_model.predict([[month_sin, month_cos, lagged_sales, 0, 0, 0]])[0]
+        future_sales.append(prediction)
+
+    # Remove the initial last_known_sales from future_sales
+    future_sales = future_sales[1:]
+
     future_predictions = pd.DataFrame({'Order Month': future_months, 'Predicted Sales': future_sales})
     st.write(future_predictions)
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -153,21 +171,31 @@ def app():
     ax.legend()
     st.pyplot(fig)
 
+
     # High Sales Products
-    st.header("🏆 High Sales Products")
+    def create_bar_chart(data, title, xlabel, ylabel):
+            fig, ax = plt.subplots(figsize=(10, 6))
+            data.plot(kind='bar', ax=ax, color='purple')
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            st.pyplot(fig)
+
+    # Top 10 High Sales Products
+    st.header("🏆 Top 10 High Sales Products")
     high_sales_products = df.groupby('Product Name')['Sales'].sum().sort_values(ascending=False).head(10)
-    st.bar_chart(high_sales_products)
+    create_bar_chart(high_sales_products, 'Top 10 High Sales Products', 'Product Name', 'Sales')
     
-    # Profit Margins
-    st.header("💹 Profit Margins")
+    # Top 10 Profit Margins
+    st.header("💹 Top 10 Profit Margins")
     profit_margins = df.groupby('Product Name')['Profit'].sum().sort_values(ascending=False).head(10)
-    st.bar_chart(profit_margins)
+    create_bar_chart(profit_margins, 'Top 10 Profit Margins', 'Product Name', 'Profit')
     
-    # High-Value Customers
-    st.header("💎 High-Value Customers")
+    # Top 10 High-Value Customers
+    st.header("💎 Top 10 High-Value Customers")
     high_value_customers = df.groupby('Customer Name')['Sales'].sum().sort_values(ascending=False).head(10)
-    st.bar_chart(high_value_customers)
-    
+    create_bar_chart(high_value_customers, 'Top 10 High-Value Customers', 'Customer Name', 'Sales')
+        
     # Discount Impact on Profit
     st.header("🔍 Discount Impact on Profit")
     discount_profit = df.groupby('Discount')['Profit'].sum().reset_index()
@@ -181,32 +209,14 @@ def app():
     # Shipping Efficiency
     st.header("🚚 Shipping Efficiency")
     shipping_efficiency = df.groupby('Ship Mode')['Profit'].sum().reset_index()
+    # Plotting with matplotlib using plt syntax
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(shipping_efficiency['Ship Mode'], shipping_efficiency['Profit'], color='skyblue')
-    ax.set_title('Shipping Mode Efficiency')
-    ax.set_xlabel('Ship Mode')
-    ax.set_ylabel('Profit')
+    plt.bar(shipping_efficiency['Ship Mode'], shipping_efficiency['Profit'], color='skyblue')
+    plt.title('Shipping Mode Efficiency')
+    plt.xlabel('Ship Mode')
+    plt.ylabel('Profit')
     st.pyplot(fig)
     
-    # Credit Risk Analysis
-    st.header("⚠️ Credit Risk Analysis")
-    credit_risk_df = df.groupby('Customer Name').agg({
-        'Sales': 'sum',
-        'Profit': 'sum',
-        'Discount': 'mean'
-    }).reset_index()
-    
-    # Identify high-risk customers
-    high_risk_customers = credit_risk_df[(credit_risk_df['Profit'] < 0) & (credit_risk_df['Discount'] > 0.2)]
-    st.subheader("High-Risk Customers")
-    st.write(high_risk_customers)
-    
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(high_risk_customers['Sales'], high_risk_customers['Profit'], color='red')
-    ax.set_title('High-Risk Customers: Sales vs. Profit')
-    ax.set_xlabel('Sales')
-    ax.set_ylabel('Profit')
-    st.pyplot(fig)
 
 if __name__ == '__main__':
     app()
