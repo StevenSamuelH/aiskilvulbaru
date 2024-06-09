@@ -95,7 +95,8 @@ def app():
         'max_depth': [3, 4, 5, 6],
         'min_samples_split': [2, 5, 10, 15],
         'min_samples_leaf': [1, 2, 4, 6],
-        'subsample': [0.8, 0.9, 1.0]
+        'subsample': [0.8, 0.9, 1.0],
+        'max_features': ['auto', 'sqrt', 'log2']
     }
 
     random_search = RandomizedSearchCV(GradientBoostingRegressor(random_state=42), param_distributions=param_dist, n_iter=100, cv=5, scoring='r2', random_state=42)
