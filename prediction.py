@@ -3,8 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, VotingRegressor
-from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
 def app():
@@ -87,43 +86,23 @@ def app():
     X = monthly_sales[['Month_sin', 'Month_cos', 'Lagged_Sales', 'Discount', 'Profit', 'Quantity']].values
     y = monthly_sales['Sales'].values
 
-    scaler = StandardScaler()
-    X = scaler.fit_transform(X)
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Hyperparameter tuning for Gradient Boosting Regressor and Random Forest Regressor
-    gb_param_dist = {
-        'n_estimators': [100, 200, 300, 400, 500],
-        'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3],
-        'max_depth': [3, 4, 5, 6, 7],
-        'min_samples_split': [2, 5, 10, 15],
-        'min_samples_leaf': [1, 2, 4]
+    # Parameter tuning for Gradient Boosting Regressor
+    param_dist = {
+    'n_estimators': [100, 200, 300],
+    'learning_rate': [0.01, 0.1, 0.2],
+    'max_depth': [3, 4, 5],
+    'min_samples_split': [2, 5, 10]
     }
 
-    rf_param_dist = {
-        'n_estimators': [100, 200, 300, 400, 500],
-        'max_features': ['auto', 'sqrt', 'log2'],
-        'max_depth': [None, 10, 20, 30, 40],
-        'min_samples_split': [2, 5, 10],
-        'min_samples_leaf': [1, 2, 4]
-    }
+    random_search = RandomizedSearchCV(GradientBoostingRegressor(random_state=42), param_distributions=param_dist, n_iter=50, cv=5, scoring='r2', random_state=42)
+    random_search.fit(X_train, y_train)
 
-    with st.spinner('Training the models, please wait...'):
-        gb_random_search = RandomizedSearchCV(GradientBoostingRegressor(random_state=42), param_distributions=gb_param_dist, n_iter=100, cv=5, scoring='r2', random_state=42, n_jobs=-1)
-        rf_random_search = RandomizedSearchCV(RandomForestRegressor(random_state=42), param_distributions=rf_param_dist, n_iter=100, cv=5, scoring='r2', random_state=42, n_jobs=-1)
+    best_model = random_search.best_estimator_
 
-        gb_random_search.fit(X_train, y_train)
-        rf_random_search.fit(X_train, y_train)
-
-    best_gb_model = gb_random_search.best_estimator_
-    best_rf_model = rf_random_search.best_estimator_
-
-    # Ensemble model
-    ensemble_model = VotingRegressor(estimators=[('gb', best_gb_model), ('rf', best_rf_model)])
-    ensemble_model.fit(X_train, y_train)
-
-    y_pred = ensemble_model.predict(X_test)
+    y_pred = best_model.predict(X_test)
     mse = mean_squared_error(y_test, y_pred)
     r2 = r2_score(y_test, y_pred)
     mae = mean_absolute_error(y_test, y_pred)
@@ -131,7 +110,7 @@ def app():
     st.write(f"**R2 Score:** {r2}")
     st.write(f"**Mean Absolute Error:** {mae}")
 
-    st.subheader("📈 Ensemble Model Results")
+    st.subheader("📈 Gradient Boosting Model Results")
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.scatter(range(len(X_train)), y_train, color='blue', label='Training Data')
     ax.scatter(range(len(X_train), len(X_train) + len(X_test)), y_test, color='green', label='Test Data')
@@ -141,6 +120,7 @@ def app():
     ax.set_title('Monthly Sales Prediction')
     ax.legend()
     st.pyplot(fig)
+
 
     st.subheader("📅 Future Sales Prediction")
     # Future Predictions
@@ -155,7 +135,7 @@ def app():
         month_sin = np.sin(2 * np.pi * (i % 12) / 12)
         month_cos = np.cos(2 * np.pi * (i % 12) / 12)
         lagged_sales = future_sales[-1]
-        prediction = ensemble_model.predict([[month_sin, month_cos, lagged_sales, 0, 0, 0]])[0]
+        prediction = best_model.predict([[month_sin, month_cos, lagged_sales, 0, 0, 0]])[0]
         future_sales.append(prediction)
 
     # Remove the initial last_known_sales from future_sales
@@ -181,7 +161,7 @@ def app():
             ax.set_title(title)
             st.pyplot(fig)
 
-    # Top 10 High Sales Products
+# Top 10 High Sales Products
     st.header("🏆 Top 10 High Sales Products")
     high_sales_products = df.groupby('Product Name')['Sales'].sum().sort_values(ascending=False).head(10)
     create_bar_chart(high_sales_products, 'Top 10 High Sales Products', 'Product Name', 'Sales')
@@ -209,7 +189,7 @@ def app():
     # Shipping Efficiency
     st.header("🚚 Shipping Efficiency")
     shipping_efficiency = df.groupby('Ship Mode')['Profit'].sum().reset_index()
-    # Plotting with matplotlib using plt syntax
+# Plotting with matplotlib using plt syntax
     fig, ax = plt.subplots(figsize=(10, 6))
     plt.bar(shipping_efficiency['Ship Mode'], shipping_efficiency['Profit'], color='skyblue')
     plt.title('Shipping Mode Efficiency')
